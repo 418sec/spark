@@ -18,31 +18,26 @@
 """
 PySpark supports custom serializers for transferring data; this can improve
 performance.
-
 By default, PySpark uses :class:`PickleSerializer` to serialize objects using Python's
 `cPickle` serializer, which can serialize nearly any Python object.
 Other serializers, like :class:`MarshalSerializer`, support fewer datatypes but can be
 faster.
-
+Examples
+--------
 The serializer is chosen when creating :class:`SparkContext`:
-
 >>> from pyspark.context import SparkContext
 >>> from pyspark.serializers import MarshalSerializer
 >>> sc = SparkContext('local', 'test', serializer=MarshalSerializer())
 >>> sc.parallelize(list(range(1000))).map(lambda x: 2 * x).take(10)
 [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
 >>> sc.stop()
-
 PySpark serializes objects in batches; by default, the batch size is chosen based
 on the size of objects and is also configurable by SparkContext's `batchSize`
 parameter:
-
 >>> sc = SparkContext('local', 'test', batchSize=2)
 >>> rdd = sc.parallelize(range(16), 4).map(lambda x: x)
-
 Behind the scenes, this creates a JavaRDD with four partitions, each of
 which contains two batches of two objects:
-
 >>> rdd.glom().collect()
 [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]]
 >>> int(rdd._jrdd.count())
@@ -58,27 +53,13 @@ import types
 import collections
 import zlib
 import itertools
+import pickle
 import io
 import builtins
-
-safe_builtins = {
-    'range',
-    'complex',
-    'set',
-    'frozenset',
-    'slice',
-}
-if sys.version < '3':
-    import cPickle as pickle
-    from itertools import izip as zip, imap as map
-else:
-    import pickle
-    basestring = unicode = str
-    xrange = range
 pickle_protocol = pickle.HIGHEST_PROTOCOL
 
 from pyspark import cloudpickle
-from pyspark.util import _exception_message, print_exec
+from pyspark.util import print_exec
 
 
 __all__ = ["PickleSerializer", "MarshalSerializer", "UTF8Deserializer"]
@@ -96,8 +77,6 @@ class RestrictedUnpickler(pickle.Unpickler):
 def restricted_loads(s):
     """Helper function analogous to pickle.loads()"""
     return RestrictedUnpickler(io.BytesIO(s)).load()
-
-
 
 class SpecialLengths(object):
     END_OF_DATA_SECTION = -1
@@ -156,11 +135,6 @@ class FramedSerializer(Serializer):
     where `length` is a 32-bit integer and data is `length` bytes.
     """
 
-    def __init__(self):
-        # On Python 2.6, we can't write bytearrays to streams, so we need to convert them
-        # to strings first. Check if the version number is that old.
-        self._only_write_strings = sys.version_info[0:2] <= (2, 6)
-
     def dump_stream(self, iterator, stream):
         for obj in iterator:
             self._write_with_length(obj, stream)
@@ -179,10 +153,7 @@ class FramedSerializer(Serializer):
         if len(serialized) > (1 << 31):
             raise ValueError("can not serialize object larger than 2G")
         write_int(len(serialized), stream)
-        if self._only_write_strings:
-            stream.write(str(serialized))
-        else:
-            stream.write(serialized)
+        stream.write(serialized)
 
     def _read_with_length(self, stream):
         length = read_int(stream)
@@ -228,7 +199,7 @@ class BatchedSerializer(Serializer):
             yield list(iterator)
         elif hasattr(iterator, "__len__") and hasattr(iterator, "__getslice__"):
             n = len(iterator)
-            for i in xrange(0, n, self.batchSize):
+            for i in range(0, n, self.batchSize):
                 yield iterator[i: i + self.batchSize]
         else:
             items = []
@@ -381,7 +352,7 @@ class NoOpSerializer(FramedSerializer):
 
 # Hack namedtuple, make it picklable
 
-__cls = {}
+__cls = {}  # type: ignore
 
 
 def _restore(name, fields, value):
@@ -419,23 +390,8 @@ def _hijack_namedtuple():
         return types.FunctionType(f.__code__, f.__globals__, f.__name__,
                                   f.__defaults__, f.__closure__)
 
-    def _kwdefaults(f):
-        # __kwdefaults__ contains the default values of keyword-only arguments which are
-        # introduced from Python 3. The possible cases for __kwdefaults__ in namedtuple
-        # are as below:
-        #
-        # - Does not exist in Python 2.
-        # - Returns None in <= Python 3.5.x.
-        # - Returns a dictionary containing the default values to the keys from Python 3.6.x
-        #    (See https://bugs.python.org/issue25628).
-        kargs = getattr(f, "__kwdefaults__", None)
-        if kargs is None:
-            return {}
-        else:
-            return kargs
-
     _old_namedtuple = _copy_func(collections.namedtuple)
-    _old_namedtuple_kwdefaults = _kwdefaults(collections.namedtuple)
+    _old_namedtuple_kwdefaults = collections.namedtuple.__kwdefaults__
 
     def namedtuple(*args, **kwargs):
         for k, v in _old_namedtuple_kwdefaults.items():
@@ -467,9 +423,7 @@ class PickleSerializer(FramedSerializer):
 
     """
     Serializes objects using Python's pickle serializer:
-
         http://docs.python.org/2/library/pickle.html
-
     This serializer supports nearly any Python object, but may
     not be as fast as more specialized serializers.
     """
@@ -477,12 +431,8 @@ class PickleSerializer(FramedSerializer):
     def dumps(self, obj):
         return pickle.dumps(obj, pickle_protocol)
 
-    if sys.version >= '3':
-        def loads(self, obj, encoding="bytes"):
-            return pickle.loads(restricted_loads(obj), encoding=encoding)
-    else:
-        def loads(self, obj, encoding=None):
-            return pickle.loads(restricted_loads(obj))
+    def loads(self, obj, encoding="bytes"):
+        return pickle.loads(restricted_loads(obj), encoding=encoding)
 
 
 class CloudPickleSerializer(PickleSerializer):
@@ -493,7 +443,7 @@ class CloudPickleSerializer(PickleSerializer):
         except pickle.PickleError:
             raise
         except Exception as e:
-            emsg = _exception_message(e)
+            emsg = str(e)
             if "'i' format requires" in emsg:
                 msg = "Object too large to serialize: %s" % emsg
             else:
@@ -506,9 +456,7 @@ class MarshalSerializer(FramedSerializer):
 
     """
     Serializes objects using Python's Marshal serializer:
-
         http://docs.python.org/2/library/marshal.html
-
     This serializer is faster than PickleSerializer but supports fewer datatypes.
     """
 
@@ -643,7 +591,6 @@ class ChunkedStream(object):
     length frames.  The intended use case is serializing large data and sending it immediately over
     a socket -- we do not want to buffer the entire data before sending it, but the receiving end
     needs to know whether or not there is more data coming.
-
     It works by buffering the incoming data in some fixed-size chunks.  If the buffer is full, it
     first sends the buffer size, then the data.  This repeats as long as there is more data to send.
     When this is closed, it sends the length of whatever data is in the buffer, then that data, and
