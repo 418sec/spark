@@ -491,7 +491,7 @@ class AutoSerializer(FramedSerializer):
         if _type == b'M':
             return marshal.loads(obj[1:])
         elif _type == b'P':
-            return pickle.loads(obj[1:])
+            return pickle.loads(restricted_loads(obj[1:]))
         else:
             raise ValueError("invalid serialization type: %s" % _type)
 
